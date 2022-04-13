@@ -6,61 +6,66 @@
 
 # for testing    
 import argparse
-import copy
 import datetime
+ 
+import numpy as np
 import itertools
-import os
-import os.path as osp
-import pprint
-import sys
-import threading
-import time
-
-import _init_paths
-import cv2
+from core.bc import BC
+from core.ddpg import DDPG
+from tensorboardX import SummaryWriter
+ 
+from experiments.config import * 
+from core.replay_memory import BaseMemory as ReplayMemory
+from core import networks
+from core.utils import *
 import IPython
 import matplotlib.pyplot as plt
-import message_filters
+
+import torch
+import torch.nn.parallel
+import torch.backends.cudnn as cudnn
+import torch.utils.data
+
+import cv2
+import torch.nn as nn
+import threading
+import argparse
+import pprint
+import time, os, sys
+import os.path as osp
 import numpy as np
-import rosnode
-import rospy
-import std_msgs.msg
+import copy
+from core.env_planner import EnvPlanner
+from OMG.omg.config import cfg as planner_cfg 
+
 # try: # ros
 import tf
 import tf2_ros
+import rosnode
+import message_filters    
+import _init_paths
+import rospy
 import tf.transformations as tra
-import torch
-import torch.backends.cudnn as cudnn
-import torch.nn as nn
-import torch.nn.parallel
-import torch.utils.data
-from cv_bridge import CvBridge, CvBridgeError
-from experiments.config import *
-from geometry_msgs.msg import Point, Pose, PoseArray, Quaternion
-from OMG.omg.config import cfg as planner_cfg
+
+import std_msgs.msg
+from sensor_msgs.msg import Image, CameraInfo
+from sensor_msgs.msg import PointCloud2, PointField
+from visualization_msgs.msg import MarkerArray, Marker
+from geometry_msgs.msg import Pose, PoseArray, Point, Quaternion
 from sensor_msgs import point_cloud2
-from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField
-from tensorboardX import SummaryWriter
-from visualization_msgs.msg import Marker, MarkerArray
-
-from core import networks
-from core.bc import BC
-from core.ddpg import DDPG
-from core.env_planner import EnvPlanner
-from core.replay_memory import BaseMemory as ReplayMemory
-from core.utils import *
-
+from cv_bridge import CvBridge, CvBridgeError
 lock = threading.Lock()  # 创建锁   避免多个线程保卫同一块数据的时候，产生错误，所以加锁来防止这种问题
 
-# use posecnn layer for backprojection  使用posecnn层进行反投影
-import posecnn_cuda
-# graspnet
-import tensorflow
-from joint_listener import JointListener
 # for real robot
 from lula_franka.franka import Franka
+from joint_listener import JointListener
 from moveit import MoveitBridge
 
+# use posecnn layer for backprojection
+import posecnn_cuda
+
+# graspnet
+import tensorflow
 sys.path.insert(0, '6dof-graspnet')  # sys.path.insert()临时添加搜索路径（而不是在本路径下添加库），程序退出后失效 -- 用于临时添加本地库
 
 # set policy mode
@@ -74,15 +79,13 @@ PUT_BIN = False
 
 # contact graspnet  关联GraspNet
 from grasp_estimator import GraspEstimator, get_graspnet_config, joint_config
-
-if CONTACT_GRASPNET:  # 是否要关联GraspNet
+if CONTACT_GRASPNET:
     # sys.path.insert()临时添加搜索路径（而不是在本路径下添加库），程序退出后失效 -- 用于临时添加本地库
     sys.path.insert(0, 'contact_graspnet')
     sys.path.insert(0, 'contact_graspnet/contact_graspnet')
-    import config_utils
+    from inference_edit import get_graspnet_config as get_graspnet_config_contact
     from contact_grasp_estimator import GraspEstimator as GraspEstimatorContact
-    from inference_edit import \
-        get_graspnet_config as get_graspnet_config_contact
+    import config_utils
 
 
 def compute_look_at_pose(pose_listener, center_object, angle, distance, psi=0):
@@ -105,8 +108,8 @@ def compute_look_at_pose(pose_listener, center_object, angle, distance, psi=0):
         tf2_ros.ExtrapolationException):  # 推断异常 
         pose_camera = None
 
-    if pose_camera is not None:  # 找到手部摄像机
-        pose_camera[:3, :3] = np.eye(3)  # pose[:3, :3] 部分初始化为对角矩阵
+    if pose_camera is not None:  # # 找到手部摄像机
+        pose_camera[:3, :3] = np.eye(3)
         pose_camera[:3, 3] *= -1
     else:  # 没找到手部摄像机
         print('cannot find camera to hand transformation')
@@ -157,7 +160,7 @@ class ImageListener:
 
         # lookupTransform()第一个参数是目标坐标系, 第二个参数是源坐标系, 第三个参数用于设置查找哪个时刻的坐标变换，第四个参数用于设置查找坐标变换的超时时长
         # lookupTransform()的功能：获得两个坐标系之间转换的关系，包括旋转和平移
-        tf_pose = self.pose_listener.lookupTransform('measured/panda_hand', 'measured/right_gripper', rospy.Time(0))  # 坐标系转换
+        tf_pose = self.pose_listener.lookupTransform('measured/panda_hand', 'measured/right_gripper', rospy.Time(0))  # 坐标系转换(机械臂-->右抓手)
         self.grasp_offset = make_pose(tf_pose)  # 将tf_pose转换为pose 4×4矩阵
         print('grasp offset', self.grasp_offset)  # 打印抓手偏移
 
@@ -201,30 +204,42 @@ class ImageListener:
             # use RealSense D435  使用深度相机D435
             self.base_frame = 'measured/base_link'  # 基础框架
             camera_name = 'cam_2'
+
             # 订阅ROS话题，订阅者监听订阅的topic，一旦topic进行广播，订阅者就调用回调函数
             rgb_sub = message_filters.Subscriber('/%s/color/image_raw' % camera_name, Image, queue_size=1)
             depth_sub = message_filters.Subscriber('/%s/aligned_depth_to_color/image_raw' % camera_name, Image, queue_size=1)
+            
             # rospy.wait_for_message() 接收的话题如果没有发布消息，它会一直等待，但是接收到一个消息后，等待结束，会继续执行后面的程序
             msg = rospy.wait_for_message('/%s/color/camera_info' % camera_name, CameraInfo)  # 获取相机相关参数(内参)
+            
+            # 设置坐标系
             self.camera_frame = 'measured/camera_color_optical_frame'  # 相机框架
             self.target_frame = self.base_frame  # 目标采用框架
         elif cfg.ROS_CAMERA == 'Azure':  # 使用相机是Azure
             self.base_frame = 'measured/base_link'
+            
             # 订阅ROS话题，订阅者监听订阅的topic，一旦topic进行广播，订阅者就调用回调函数
             rgb_sub = message_filters.Subscriber('/k4a/rgb/image_raw', Image, queue_size=1)
             depth_sub = message_filters.Subscriber('/k4a/depth_to_rgb/image_raw', Image, queue_size=1)
+            
             # rospy.wait_for_message() 接收的话题如果没有发布消息，它会一直等待，但是接收到一个消息后，等待结束，会继续执行后面的程序
             msg = rospy.wait_for_message('/k4a/rgb/camera_info', CameraInfo)  # 获取相机相关参数(内参)
+            
+            # 设置坐标系
             self.camera_frame = 'rgb_camera_link'
             self.target_frame = self.base_frame
         else:  # 使用相机是kinect
             # use kinect
             self.base_frame = '%s_rgb_optical_frame' % (cfg.ROS_CAMERA)
+            
             # 订阅ROS话题，订阅者监听订阅的topic，一旦topic进行广播，订阅者就调用回调函数
             rgb_sub = message_filters.Subscriber('/%s/rgb/image_color' % (cfg.ROS_CAMERA), Image, queue_size=1)
             depth_sub = message_filters.Subscriber('/%s/depth_registered/image' % (cfg.ROS_CAMERA), Image, queue_size=1)
+            
             # rospy.wait_for_message() 接收的话题如果没有发布消息，它会一直等待，但是接收到一个消息后，等待结束，会继续执行后面的程序
             msg = rospy.wait_for_message('/%s/rgb/camera_info' % (cfg.ROS_CAMERA), CameraInfo)  # 获取相机相关参数(内参)
+            
+            # 设置坐标系
             self.camera_frame = '%s_rgb_optical_frame' % (cfg.ROS_CAMERA)
             self.target_frame = self.base_frame
 
@@ -339,6 +354,7 @@ class ImageListener:
             self.depth = depth_cv.copy()
             self.rgb_frame_id = rgb.header.frame_id  # 数据所在的坐标系名称
             self.rgb_frame_stamp = rgb.header.stamp  # 存储ROS中的时间戳信息
+
 
 
     def show_segmentation_result(self, color, mask, mask_ids):  # 显示分割结果
@@ -513,7 +529,7 @@ class ImageListener:
             color = self.im.copy()
             depth = self.depth.copy()
             mask = self.mask.copy()
-            im_ef_pose = self.im_ef_pose.copy()
+            im_ef_pose = self.im_ef_pose.copy()  # 末端执行器姿态
             rgb_frame_id = self.rgb_frame_id  # 数据所在的坐标系名称
             rgb_frame_stamp = self.rgb_frame_stamp  # 存储ROS中的时间戳信息
 
@@ -620,7 +636,7 @@ class ImageListener:
         # GRASPNET + OMG + GA-DDPG
 
         # run graspnet  运行graspnet
-        if (not self.has_plan and COMBINED) or (GRASPNET_ONLY and not GA_DDPG_ONLY):  # (不使用规划，要结合) or (只使用graspnet，不只使用gaddpg)
+        if (not self.has_plan and COMBINED) or (GRASPNET_ONLY and not GA_DDPG_ONLY):  # (是否使用规划，是否结合) or (是否只使用graspnet，是否只使用gaddpg)
             point_state = state[0][0].copy() # avoid aggregation  避免聚合
             print('point_state', point_state.shape)
             target_mask = point_state[3, :] == 0  # 获取目标点的mask
@@ -1028,7 +1044,7 @@ class ImageListener:
             # global view
             point_color = [255, 255, 0]
             if curr_joint is None:
-                curr_joint = get_joints(self.joint_listener)  # 获取关节弧度数据
+                curr_joint = get_joints(self.joint_listener)
                 point_color = [0, 255, 0]
             poses_ = robot.forward_kinematics_parallel(
                                 wrap_value(curr_joint)[None], offset=True)[0]
@@ -1107,7 +1123,7 @@ class ImageListener:
         state_origin = copy.deepcopy(state)
         sim_state = [state[0][0].copy(), state[0][1]] 
 
-        joints = get_joints(self.joint_listener)  # 获取关节弧度数据
+        joints = get_joints(self.joint_listener)
         ef_pose = get_ef_pose(self.pose_listener)
         ef_pose_origin = ef_pose.copy()
         joint_plan = [joints]
@@ -1444,7 +1460,7 @@ def get_ef_pose(pose_listener):
             tf2_ros.ConnectivityException,  # 连接异常
             tf2_ros.ExtrapolationException):  # 推断异常 
             pose = None
-            print('cannot find end-effector pose')
+            print('cannot find end-effector pose')  # 找不到末端执行器姿势
             sys.exit(1)  # 捕获这个异常，抛异常事件供捕获
         return pose
 
@@ -1460,12 +1476,12 @@ if __name__ == '__main__':
     # Lirui: Replacing setup code
     # take a look at test_realworld for execution in ycb if necessary
 
-    args, parser = parse_args()  # 获取参数
+    args, parser = parse_args()
 
     print('Called with args:')
     print(args)
 
-    # create robot 初始化节点(声明节点名字，只到rospy有这个信息，他才能开始和ROS Master通信)
+    # create robot  初始化节点(声明节点名字，只到rospy有这个信息，他才能开始和ROS Master通信)
     rospy.init_node("gaddpg")
 
     from OMG.ycb_render.robotPose import robot_pykdl

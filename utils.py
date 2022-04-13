@@ -2,36 +2,38 @@
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
 
-import copy
-import math
-import os
-import random
-import sys
-import time
-from collections import deque
-
-import cv2
-import GPUtil
-import IPython
-import matplotlib.pyplot as plt
 import numpy as np
-import psutil
-import scipy.io as sio
-import tabulate
-import torch
-import torch.nn.functional as F
-import yaml
-from easydict import EasyDict as edict
-from pointnet2_ops.pointnet2_utils import (furthest_point_sample,
-                                           gather_operation)
-from scipy import interpolate
-from torch import nn, optim
-from torch.optim import Adam
-from transforms3d.axangles import *
-from transforms3d.euler import *
+import os
+import sys
 from transforms3d.quaternions import *
+from transforms3d.euler import *
+from transforms3d.axangles import *
+import random
+
+from scipy import interpolate
+import scipy.io as sio
+import IPython
+import time
+from torch import nn
+from torch import optim
+
+import torch.nn.functional as F
+import cv2
+
+import matplotlib.pyplot as plt
+import tabulate
+import yaml
+import torch
 
 from core import networks
+import copy
+import math
+from easydict import EasyDict as edict
+from pointnet2_ops.pointnet2_utils import furthest_point_sample, gather_operation
+from torch.optim import Adam 
+from collections import deque
+import psutil
+import GPUtil
 
 hand_finger_point = np.array([ [ 0.,  0.,  0.   , -0.   ,  0.   , -0.   ],
                                [ 0.,  0.,  0.053, -0.053,  0.053, -0.053],
@@ -104,7 +106,8 @@ def module_max_gradient(module):
         [(maybe_max(param.grad)) for name, param in module.named_parameters()]
     )
     return max_grad
- 
+
+
 def normalize(v, axis=None, eps=1e-10):
     """L2 Normalize along specified axes."""
     return v / max(np.linalg.norm(v, axis=axis, keepdims=True), eps)
@@ -119,6 +122,7 @@ def inv_lookat(eye, target=[0, 0, 0], up=[0, 1, 0]):
     R = np.stack([side, up, -forward], axis=-1)
     return R
 
+
 def rand_sample_joint(env, init_joints=None, near=0.2, far=0.5):
     """
     randomize initial joint configuration
@@ -126,6 +130,7 @@ def rand_sample_joint(env, init_joints=None, near=0.2, far=0.5):
     init_joints_ = env.randomize_arm_init(near, far)
     init_joints = init_joints_ if init_joints_ is not None else init_joints
     return init_joints
+
 
 def check_scene(env, state, start_rot, object_performance=None, scene_name=None, 
                         init_dist_low=0.2, init_dist_high=0.5, run_iter=0):
@@ -153,6 +158,7 @@ def merge_two_dicts(x, y):
     z.update(y)    
     return z
 
+
 def process_image_input(state):
     state[:, :3] *= 255
     if state.shape[1] >= 4:
@@ -161,11 +167,13 @@ def process_image_input(state):
         state[:, -1][state[:, -1] == -1] = 50
     return state.astype(np.uint16)
 
+
 def check_ngc():
     GPUs = GPUtil.getGPUs()
     gpu_limit = max([GPU.memoryTotal for GPU in GPUs])
     return (gpu_limit > 14000)
-    
+
+
 def process_image_output(sample):
     sample = sample.astype(np.float32).copy()
     n = len(sample)
@@ -253,15 +261,18 @@ def fc(batchNorm, in_planes, out_planes):
             nn.Linear(in_planes, out_planes), nn.LeakyReLU(0.1, inplace=True)
         )
 
+
 def deg2rad(deg):
     if type(deg) is list:
         return [x/180.0*np.pi for x in deg]
     return deg/180.0*np.pi
 
+
 def rad2deg(rad):
     if type(rad) is list:
         return [x/np.pi*180 for x in rad]
     return rad/np.pi*180
+
 
 def make_video_writer(name, window_width, window_height):
     fourcc = cv2.VideoWriter_fourcc(*"MJPG")  # MJPG
@@ -297,6 +308,7 @@ def concat_state_action_channelwise(state, action):
     state = torch.cat((state, action.expand(-1, -1, state.shape[2])), 1)
     return state
 
+
 def safemat2quat(mat):
     quat = np.array([1,0,0,0])
     try:
@@ -306,7 +318,8 @@ def safemat2quat(mat):
     quat[np.isnan(quat)] = 0
     return quat
 
-def se3_transform_pc(pose, point):  # 转换坐标系(转换到点云坐标系)
+
+def se3_transform_pc(pose, point):
     if point.shape[1] == 3:
         return pose[:3, :3].dot(point) + pose[:3, [3]]
     else:
@@ -314,8 +327,10 @@ def se3_transform_pc(pose, point):  # 转换坐标系(转换到点云坐标系)
         point_[:3] = pose[:3, :3].dot(point[:3]) + pose[:3, [3]]
         return point_
 
+
 def has_check(x, prop):
     return hasattr(x, prop) and getattr(x, prop)
+
 
 def migrate_model(in_model, out_model, surfix="latest", grasp_model=None):
     in_policy_name, out_policy_name = "BC", "DDPG"
@@ -360,12 +375,12 @@ def depth_termination_heuristics(depth_img, mask_img):
 
 def get_info(state, opt="img", IMG_SIZE=(112, 112)):
     if opt == "img":
-        return (state[0][1][:3].T * 255).astype(np.uint8)
+        return (state[0][1][:3].T * 255).astype(np.uint8)  # 获取img_state
     if opt == "intr":
         cam_proj = np.array(state[-2][48:]).reshape([4, 4])
-        return projection_to_intrinsics(cam_proj, IMG_SIZE[0], IMG_SIZE[1])[:3, :3]
+        return projection_to_intrinsics(cam_proj, IMG_SIZE[0], IMG_SIZE[1])[:3, :3]  # 获取相机内参矩阵
     if opt == "point":
-        return state[0][0][:3].T.copy()
+        return state[0][0][:3].T.copy()  # 获取point_state
  
 
 def write_video(
@@ -420,7 +435,8 @@ def make_gripper_pts(points, color=(1, 0, 0)):
         [color for i in range(len(line_index))]
     )
     return line_set
- 
+
+
 def _cross_matrix(x):
     """
     cross product matrix
@@ -434,6 +450,7 @@ def a2e(q):
     Rae = np.eye(3) + r + r.dot(r) / (1 + np.dot(p, q))
     return mat2euler(Rae)
 
+
 def get_camera_constant(width):
     K = np.eye(3)
     K[0,0]=K[0,2]=K[1,1]=K[1,2] = width / 2.0
@@ -444,14 +461,17 @@ def get_camera_constant(width):
     offset_pose[2,3]=offset_pose[1,3]=-0.036
     return offset_pose, K
 
-def se3_inverse(RT):  # 矩阵的逆
+
+def se3_inverse(RT):
+    """ 矩阵的逆 """
     R = RT[:3, :3]
     T = RT[:3, 3].reshape((3, 1))
     RT_new = np.eye(4, dtype=np.float32)
     RT_new[:3, :3] = R.transpose()  # 矩阵转置
     RT_new[:3, 3] = -1 * np.dot(R.transpose(), T).reshape((3))
     return RT_new
- 
+
+
 def backproject_camera_target(im_depth, K, target_mask):  
     Kinv = np.linalg.inv(K)  # K逆矩阵
 
@@ -472,6 +492,7 @@ def backproject_camera_target(im_depth, K, target_mask):
     X[1] *= -1  # flip y OPENGL. might be required for real-world
     return X[:, mask]
 
+
 def backproject_camera_target_realworld(im_depth, K, target_mask):   
     Kinv = np.linalg.inv(K)
 
@@ -491,6 +512,7 @@ def backproject_camera_target_realworld(im_depth, K, target_mask):
     )
     return X[:, mask]
 
+
 def proj_point_img(img, K, offset_pose, points, color=(255, 0, 0), vis=False, neg_y=True, real_world=False): 
     xyz_points = offset_pose[:3, :3].dot(points) + offset_pose[:3, [3]]
     if real_world:
@@ -502,6 +524,7 @@ def proj_point_img(img, K, offset_pose, points, color=(255, 0, 0), vis=False, ne
     valid_idx_mask = (x > 0) * (x < img.shape[1] - 1) * (y > 0) * (y < img.shape[0] - 1)
     img[y[valid_idx_mask], x[valid_idx_mask]] = (0,255,0)
     return img
+
 
 class PandaTaskSpace6D():
     def __init__(self):
@@ -525,6 +548,7 @@ def get_hand_anchor_index_point():
     line_index = [[0, 1, 1, 2, 3], [1, 2, 3, 4, 5]]
     return hand_anchor_points, line_index
 
+
 def grasp_gripper_lines(pose):
     hand_anchor_points, line_index = get_hand_anchor_index_point()
     hand_points = (
@@ -534,6 +558,7 @@ def grasp_gripper_lines(pose):
     p1 = hand_points[:, :, line_index[0]].reshape([3, -1])
     p2 = hand_points[:, :, line_index[1]].reshape([3, -1])
     return [p1], [p2]
+
 
 def draw_grasp_img(img, pose, K, offset_pose, color=(255, 0, 0), vis=False, real_world=False):
     """ 绘制抓取图像 """
@@ -567,6 +592,7 @@ def draw_grasp_img(img, pose, K, offset_pose, color=(255, 0, 0), vis=False, real
 
     return img_cpy
 
+
 def get_noise_delta(action, noise_level, noise_type="uniform"):
     normal = noise_type != "uniform"
 
@@ -585,11 +611,13 @@ def get_noise_delta(action, noise_level, noise_type="uniform"):
         noise_delta[3:] *= 5  # radians
     return noise_delta
 
+
 def unpack_action(action):
     pose_delta = np.eye(4)
     pose_delta[:3, :3] = euler2mat(action[3], action[4], action[5])
     pose_delta[:3, 3] = action[:3]
     return pose_delta
+
 
 def unpack_pose(pose, rot_first=False):
     unpacked = np.eye(4)
@@ -600,6 +628,7 @@ def unpack_pose(pose, rot_first=False):
         unpacked[:3, :3] = quat2mat(pose[3:])
         unpacked[:3, 3] = pose[:3]
     return unpacked
+
 
 def quat2euler(quat):
     return mat2euler(quat2mat(quat))
@@ -667,18 +696,19 @@ def mkdir_if_missing(dst_dir):
  
  
 def unpack_pose_rot_first(pose):
-    # 将pose打包为4×4矩阵形式
+    """ 将pose打包为4×4矩阵形式 """
     unpacked = np.eye(4)
     unpacked[:3, :3] = quat2mat(pose[:4])  # 将四元数转换为3×3矩阵(方向)
     unpacked[:3, 3] = pose[4:]  # 位置
     return unpacked
  
 def pack_pose_rot_first(pose):
-    # 将pose打包为长度为7的数组形式
+    """ 将pose打包为长度为7的数组形式(位置+方向) """
     packed = np.zeros(7)
     packed[4:] = pose[:3, 3]  # 位置
     packed[:4] = safemat2quat(pose[:3, :3])  # 将3×3矩阵转换为四元数(方向)
     return packed
+
 
 def inv_pose(pose):
     return pack_pose(np.linalg.inv(unpack_pose(pose)))
@@ -731,6 +761,7 @@ def inv_relative_pose(pose1, pose2, decompose=False):
     relative_pose = se3_inverse(to_pose).dot(from_pose)
     return relative_pose
 
+
 def get_usage():
     GPUs = GPUtil.getGPUs()
     memory_usage = psutil.virtual_memory().percent
@@ -773,6 +804,7 @@ def half_hard_update(target, source, tau):
     ):
         if target_name[:7] in ["linear4", "linear5", "linear6"]:  # polyak for target 1
             target_param.data.copy_(param.data)
+
 
 def hard_update(target, source, tau=None):
     for target_param, param in zip(target.parameters(), source.parameters()):
@@ -820,6 +852,7 @@ def regularize_pc_point_count(pc, npoints, use_farthest_point=False):
             index = np.random.choice(range(pc.shape[0]), size=required)
             pc = np.concatenate((pc, pc[index, :]), axis=0)
     return pc
+
 
 def get_control_point_tensor(batch_size, use_torch=True, device="cpu", rotz=False):
     """
@@ -932,7 +965,8 @@ def tc_rotation_matrix(az, el, th, batched=False):
         rz = torch.stack([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]], dim=0)
 
         return torch.matmul(rz, torch.matmul(ry, rx))
- 
+
+
 def control_points_from_rot_and_trans(
     grasp_eulers, grasp_translations, device="cpu", grasp_pc=None
 ):
@@ -966,6 +1000,7 @@ def qrot(q, v):
     uv = torch.cross(qvec, v, dim=1)
     uuv = torch.cross(qvec, uv, dim=1)
     return (v + 2 * (q[:, :1] * uv + uuv)).view(original_shape)
+
 
 def get_policy_class(policy_net_name, args):
     policy = networks.GaussianPolicy(
@@ -1014,6 +1049,7 @@ def get_critic(args):
         extra_pred_dim=args.critic_extra_pred_dim,
     ).cuda()
     return critic, critic_optim, critic_scheduler, critic_target
+
 
 def get_loss_info_dict():
    return {     'bc_loss': deque([0], maxlen=50),
